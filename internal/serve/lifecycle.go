@@ -24,43 +24,139 @@ func clientIdle(cfg store.ServerConfig) (time.Duration, error) {
 }
 
 type streamKey struct{ peer, session string }
-type lease struct{ cancel context.CancelFunc }
+type lease struct {
+	cancel    context.CancelFunc
+	done      chan struct{}
+	admitted  *admission
+	committed bool
+	retiring  *lease
+}
+
+// admission owns exactly one main or temporary capacity token. All ownership
+// changes and lease publication happen under manager.mu.
+type admission struct {
+	main, replacement bool
+}
+
+const replacementSlots = 4
+
 type manager struct {
-	mu       sync.Mutex
-	current  map[streamKey]*lease
-	idle     time.Duration
-	logger   *log.Logger
-	sequence atomic.Uint64
-	active   atomic.Int64
+	mu           sync.Mutex
+	current      map[streamKey]*lease
+	sem          chan struct{}
+	replacements chan struct{}
+	allowed      map[string]bool
+	idle         time.Duration
+	logger       *log.Logger
+	sequence     atomic.Uint64
+	active       atomic.Int64
 }
 
 func newManager(idle time.Duration, logger *log.Logger) *manager {
 	return &manager{current: make(map[streamKey]*lease), idle: idle, logger: logger}
 }
 
-// install is called only after ok:true has been sent. Release compares identity
-// so a superseded handler cannot remove its successor.
-func (m *manager) install(peer, session string, cancel context.CancelFunc) func() {
-	if peer == "" {
-		m.logger.Print("stream peer key unavailable; replacement disabled")
-		return func() {}
+// ready excludes a lease still writing its handshake or retiring a predecessor.
+func (l *lease) ready() bool {
+	if !l.committed {
+		return false
 	}
-	k := streamKey{peer, session}
-	own := &lease{cancel}
+	if l.retiring == nil {
+		return true
+	}
+	select {
+	case <-l.retiring.done:
+		l.retiring = nil
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *manager) canReplace(peer, session string) bool {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	old := m.current[streamKey{peer, session}]
+	return old != nil && old.ready() && old.admitted != nil && old.admitted.main
+}
+
+// install atomically verifies the replacement target and transfers capacity.
+// The retiring handler owns the temporary token until its child is reaped; the
+// successor owns the main token immediately. Neither waits to acquire a token.
+func (m *manager) install(peer, session string, cancel context.CancelFunc, a *admission) (*lease, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := streamKey{peer, session}
 	old := m.current[k]
-	m.current[k] = own
-	m.mu.Unlock()
+	if a != nil && a.replacement && (old == nil || !old.ready() || old.admitted == nil || !old.admitted.main) {
+		return nil, false
+	}
+	own := &lease{cancel: cancel, done: make(chan struct{}), admitted: a}
+	if a != nil {
+		if a.replacement {
+			old.admitted.main, old.admitted.replacement = false, true
+			a.main, a.replacement = true, false
+			own.retiring = old
+		}
+	}
+	if peer != "" {
+		m.current[k] = own
+	}
 	if old != nil {
 		old.cancel()
 	}
-	return func() {
-		m.mu.Lock()
-		if m.current[k] == own {
-			delete(m.current, k)
-		}
-		m.mu.Unlock()
+	return own, true
+}
+func (m *manager) commit(l *lease) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l.committed = true
+}
+func (m *manager) finish(peer, session string, l *lease) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := streamKey{peer, session}
+	if peer != "" && m.current[k] == l {
+		delete(m.current, k)
 	}
+	close(l.done)
+}
+func (m *manager) free(a *admission) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a.main {
+		<-m.sem
+		a.main = false
+	}
+	if a.replacement {
+		<-m.replacements
+		a.replacement = false
+	}
+}
+func (m *manager) admit(peer string) *admission {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	select {
+	case m.sem <- struct{}{}:
+		return &admission{main: true}
+	default:
+	}
+	// The peer selector is authenticated by Tailcat. Recheck the loaded allowlist
+	// before granting any capacity beyond max_conns. Empty selectors never qualify.
+	if peer == "" || !m.allowed[peer] {
+		return nil
+	}
+	for k, l := range m.current {
+		if k.peer == peer && l.ready() && l.admitted != nil && l.admitted.main {
+			select {
+			case m.replacements <- struct{}{}:
+				return &admission{replacement: true}
+			default:
+				return nil
+			}
+		}
+	}
+	return nil
 }
 
 type activity struct {

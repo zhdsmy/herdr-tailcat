@@ -40,8 +40,8 @@ def main():
     init='''
 this.closed=false; this.part=PART; this.page=PAGE; this.error=ERROR; this.busy="";
 this.client={command:"herdr-tailcat"};this.profiles=[{id:"demo",client_fingerprint:"1234abcd",server_fingerprint:"abcd1234",daemon_running:true,machines:[{name:"box",id:"id",host:"demo",version:"v1",session:"work",state:STATE,why:WHY}]}];
-this.selected="demo";this.session="work";this.tests={demo:{rtt_ms:123,server:{version:"v1",exports:["work"]}}};
-this.keys={demo:{public_key:"nodekey:"+"a".repeat(64)}};this.clients=[{public_key:"nodekey:"+"b".repeat(64),fingerprint:"bbbbbbbb"}];
+this.selected="demo";this.session="work";this.tests=new Map([["demo",{rtt_ms:123,server:{version:"v1",exports:["work"]}}]]);
+this.keys=new Map([["demo",{public_key:"nodekey:"+"a".repeat(64)}]]);this.clients=[{public_key:"nodekey:"+"b".repeat(64),fingerprint:"bbbbbbbb"}];
 this.server={initialized:INITIALIZED,running:true,streams:1,allowed_clients:1,exports:["work"],version:"v1",restart_required:true,service:{loaded:true}};
 this.pending=PENDING;this.handle=cx.focus_handle();this.revealValue=()=>"DEMONSTRATION ONLY";this.clearReveal=()=>{};
 this.idInput=InputState.new();this.nameInput=InputState.new();this.keyInput=InputState.new();this.sessionInput=InputState.new();

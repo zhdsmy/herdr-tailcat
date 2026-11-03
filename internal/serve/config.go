@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -12,9 +13,16 @@ import (
 	"github.com/tailscale/tailcat"
 	"github.com/zhdsmy/herdr-tailcat/internal/allow"
 	"github.com/zhdsmy/herdr-tailcat/internal/line"
+	"github.com/zhdsmy/herdr-tailcat/internal/proto"
 	"github.com/zhdsmy/herdr-tailcat/internal/store"
+	"github.com/zhdsmy/herdr-tailcat/internal/version"
+	"golang.org/x/sys/unix"
 	"tailscale.com/types/key"
 )
+
+// replyMargin leaves room for a longer injected version string. The check uses
+// the real success reply, so the margin is extra headroom rather than the size itself.
+const replyMargin = 256
 
 func Init(home string) error {
 	dir := filepath.Join(home, "server")
@@ -57,49 +65,166 @@ func Address(home string, full bool) (string, error) {
 	}
 	return string(ci.Addr()), nil
 }
+
+// withConfigLock serializes allow and export edits across processes.
+// The same exclusive lock covers the read, the check, and the rewrite.
+func withConfigLock(home string, fn func() error) error {
+	dir := filepath.Join(home, "server")
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return e
+	}
+	f, e := os.OpenFile(filepath.Join(dir, "config.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if e != nil {
+		return e
+	}
+	defer f.Close()
+	if e = f.Chmod(0600); e != nil {
+		return e
+	}
+	if e = unix.Flock(int(f.Fd()), unix.LOCK_EX); e != nil {
+		return e
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return fn()
+}
 func AllowAdd(home, text string) error {
 	var k key.NodePublic
 	if k.UnmarshalText([]byte(text)) != nil || k.IsZero() {
 		return errors.New("invalid client public key")
 	}
-	p := filepath.Join(home, "server", "allowed_clients")
-	b, e := os.ReadFile(p)
-	if e != nil && !os.IsNotExist(e) {
-		return errors.New("cannot read allowed_clients")
-	}
-	for _, s := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(s) == k.String() {
+	return withConfigLock(home, func() error {
+		keys, found, e := editAllow(home, k, true)
+		if e != nil {
+			return e
+		}
+		if found {
 			return errors.New("client key already allowed")
 		}
+		return writeAllow(home, append(keys, k))
+	})
+}
+func AllowRemove(home, text string) (emptied bool, err error) {
+	var k key.NodePublic
+	if k.UnmarshalText([]byte(text)) != nil || k.IsZero() {
+		return false, errors.New("invalid client public key")
 	}
-	f, e := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	err = withConfigLock(home, func() error {
+		keys, found, e := editAllow(home, k, true)
+		if e != nil {
+			return e
+		}
+		if !found {
+			return ErrNotAllowed
+		}
+		out := make([]key.NodePublic, 0, len(keys)-1)
+		for _, x := range keys {
+			if x != k {
+				out = append(out, x)
+			}
+		}
+		if e = writeAllow(home, out); e != nil {
+			return e
+		}
+		emptied = len(out) == 0
+		return nil
+	})
+	return emptied, err
+}
+func editAllow(home string, k key.NodePublic, emptyOK bool) ([]key.NodePublic, bool, error) {
+	keys, e := allow.Read(filepath.Join(home, "server", "allowed_clients"), emptyOK)
 	if e != nil {
-		return e
+		return nil, false, e
 	}
-	defer f.Close()
-	separator := ""
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		separator = "\n"
+	for _, x := range keys {
+		if x == k {
+			return keys, true, nil
+		}
 	}
-	_, e = f.WriteString(separator + k.String() + "\n")
-	return e
+	return keys, false, nil
+}
+func writeAllow(home string, keys []key.NodePublic) error {
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k.String())
+		b.WriteByte('\n')
+	}
+	return store.WriteFile(filepath.Join(home, "server", "allowed_clients"), []byte(b.String()))
 }
 func ExportAdd(home, s string) error {
 	if !line.ValidName(s) {
 		return errors.New("invalid export session")
 	}
-	p := filepath.Join(home, "server", "config.json")
+	return withConfigLock(home, func() error {
+		cfg, e := readExports(home)
+		if e != nil {
+			return e
+		}
+		for _, x := range cfg.Exports {
+			if x == s {
+				return errors.New("session already exported")
+			}
+		}
+		cfg.Exports = append(cfg.Exports, s)
+		if e = exportsFit(cfg.Exports); e != nil {
+			return e
+		}
+		return store.WriteJSON(filepath.Join(home, "server", "config.json"), cfg)
+	})
+}
+func ExportRemove(home, s string) error {
+	if !line.ValidName(s) {
+		return errors.New("invalid export session")
+	}
+	return withConfigLock(home, func() error {
+		cfg, e := readExports(home)
+		if e != nil {
+			return e
+		}
+		out := make([]string, 0, len(cfg.Exports))
+		found := false
+		for _, x := range cfg.Exports {
+			if x == s {
+				found = true
+			} else {
+				out = append(out, x)
+			}
+		}
+		if !found {
+			return ErrNotExported
+		}
+		cfg.Exports = out
+		return store.WriteJSON(filepath.Join(home, "server", "config.json"), cfg)
+	})
+}
+func readExports(home string) (store.ServerConfig, error) {
 	var cfg store.ServerConfig
-	if e := store.ReadJSON(p, &cfg); e != nil {
+	e := store.ReadJSON(filepath.Join(home, "server", "config.json"), &cfg)
+	return cfg, e
+}
+
+// ErrNotAllowed and ErrNotExported identify missing removal targets.
+var ErrNotAllowed = errors.New("client key is not allowed")
+var ErrNotExported = errors.New("session is not exported")
+
+// exportsFit rejects a list whose success reply cannot fit in one 4 KiB line.
+// The encoded value is the same Response ping and connect write. replyMargin
+// is reserved so a longer version string still fits without changing the protocol.
+func exportsFit(exports []string) error {
+	n, e := replySize(exports)
+	if e != nil {
 		return e
 	}
-	for _, x := range cfg.Exports {
-		if x == s {
-			return errors.New("session already exported")
-		}
+	if n+replyMargin > proto.MaxLine {
+		return errors.New("too many exports: handshake reply would exceed 4 KiB")
 	}
-	cfg.Exports = append(cfg.Exports, s)
-	return store.WriteJSON(p, cfg)
+	return nil
+}
+func replySize(exports []string) (int, error) {
+	b, e := json.Marshal(proto.Response{Version: proto.Version, OK: true, Server: &proto.Info{Version: version.String(), Exports: exports}})
+	if e != nil {
+		return 0, e
+	}
+	return len(b) + 1, nil
 }
 func Load(home string) (store.ServerConfig, []key.NodePublic, tailcat.PrivateKey, error) {
 	var cfg store.ServerConfig
@@ -126,6 +251,9 @@ func Load(home string) (store.ServerConfig, []key.NodePublic, tailcat.PrivateKey
 			return cfg, nil, k, errors.New("invalid or duplicate export session")
 		}
 		seen[s] = true
+	}
+	if e = exportsFit(cfg.Exports); e != nil {
+		return cfg, nil, k, e
 	}
 	if cfg.MaxConns == 0 {
 		cfg.MaxConns = 16

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -72,44 +71,6 @@ func TestValidAllowListReachesStart(t *testing.T) {
 	if e != nil || calls != 1 {
 		t.Fatal("valid configuration never reached Start", e, calls)
 	}
-}
-
-func TestConcurrentOverload(t *testing.T) {
-	sem := make(chan struct{}, 1)
-	first, peer := net.Pipe()
-	defer first.Close()
-	defer peer.Close()
-	if !admit(first, sem) {
-		t.Fatal("first connection rejected")
-	}
-	const n = 12
-	done := make(chan bool, n)
-	var readers sync.WaitGroup
-	defer readers.Wait()
-	for range n {
-		a, b := net.Pipe()
-		go func() { done <- admit(b, sem) }()
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
-			defer a.Close()
-			a.SetReadDeadline(time.Now().Add(2 * time.Second))
-			var reply proto.Response
-			if err := proto.Read(bufio.NewReaderSize(a, proto.MaxLine), &reply); err != nil {
-				t.Error(err)
-				return
-			}
-			if reply.OK || reply.Error != "server busy" {
-				t.Error(reply)
-			}
-		}()
-	}
-	for range n {
-		if <-done {
-			t.Fatal("overload admitted")
-		}
-	}
-	<-sem
 }
 
 func TestPingReportsBuildVersion(t *testing.T) {

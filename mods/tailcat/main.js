@@ -26,8 +26,9 @@ export default class Tailcat extends View {
     this.queue = [];
     this.waiters = new Set();
     this.success = "";
-    this.tests = {};
-    this.keys = {};
+    // Profile ids must never resolve to inherited object properties.
+    this.tests = new Map();
+    this.keys = new Map();
     this.clients = [];
     this.page = "connect";
     this.selected = "";
@@ -65,9 +66,15 @@ export default class Tailcat extends View {
     if (!this.localReady()) { this.reject("App's local core layout is not ready.", cx); return false; }
     return true;
   }
+  gateCommand(command) { return command === "confirm" || command === "cancel"; }
   enqueue(command, cx) {
     if (this.closed) return;
-    if (this.queue.length >= 16) { this.reject("The command queue is full (16). This command was rejected.", cx); return; }
+    // Confirm and cancel are not subject to the 16-command cap. They still queue
+    // behind a refresh or busy operation; drainQueue pulls them ahead of ordinary work.
+    if (!this.gateCommand(command) && this.queue.filter((c) => !this.gateCommand(c)).length >= 16) {
+      this.reject("The command queue is full (16). This command was rejected.", cx);
+      return;
+    }
     this.queue.push(command);
     this.drainQueue(cx);
     cx.notify();
@@ -79,7 +86,7 @@ export default class Tailcat extends View {
       while (this.queue.length && !this.closed && !this.busy && !this.refreshing) {
         // A confirmation resolves the gate even if ordinary commands arrived
         // ahead of it. All other commands retain their FIFO order.
-        const index = this.pending ? this.queue.findIndex((c) => c === "confirm" || c === "cancel") : 0;
+        const index = this.pending ? this.queue.findIndex((c) => this.gateCommand(c)) : 0;
         if (index < 0) break;
         const [command] = this.queue.splice(index, 1);
         if (typeof command === "function") command(cx);
@@ -119,7 +126,7 @@ export default class Tailcat extends View {
     if (this.importing && this.profiles.some((p) => p.id === this.importing)) {
       const id = this.importing;
       this.importing = "";
-      this.keys[id] = await this.client.call(["profile", "pubkey", id]);
+      this.keys.set(id, await this.client.call(["profile", "pubkey", id]));
       this.selected = id;
     }
   }
@@ -132,7 +139,7 @@ export default class Tailcat extends View {
     if (quiet) {
       if (this.refreshing || this.pending || this.queue.length) return;
       this.refreshing = true;
-      const before = JSON.stringify([this.profiles, this.server, this.clients, this.keys, this.refreshFailed]);
+      const before = JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], this.refreshFailed]);
       cx.spawn(async (cx) => {
         try {
           if (this.page === "server") await this.loadServer();
@@ -142,7 +149,7 @@ export default class Tailcat extends View {
         finally {
           this.refreshing = false;
           if (!this.closed) {
-            if (before !== JSON.stringify([this.profiles, this.server, this.clients, this.keys, this.refreshFailed])) cx.notify();
+            if (before !== JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], this.refreshFailed])) cx.notify();
             this.drainQueue(cx);
           }
         }
@@ -160,24 +167,24 @@ export default class Tailcat extends View {
   select(id, cx) {
     if (!this.profile(id)) return;
     this.selected = id;
-    this.session = this.tests[id]?.server.exports[0] ?? "";
+    this.session = this.tests.get(id)?.server.exports[0] ?? "";
     this.nameInput.set_value((id + "-tailcat").slice(0, 32));
     cx.notify();
   }
   test(id, cx) {
     if (!this.requireProfile(id, cx)) return;
     this.perform("Testing " + id + "…", async () => {
-      this.tests[id] = await this.client.call(["profile", "test", id]);
-      if (this.selected === id) this.session = this.tests[id].server.exports[0] ?? "";
+      this.tests.set(id, await this.client.call(["profile", "test", id]));
+      if (this.selected === id) this.session = this.tests.get(id)?.server.exports[0] ?? "";
     }, cx);
   }
   pubkey(id, cx) {
     if (!this.requireProfile(id, cx)) return;
-    this.perform("Loading public key…", async () => { this.keys[id] = await this.client.call(["profile", "pubkey", id]); }, cx);
+    this.perform("Loading public key…", async () => { this.keys.set(id, await this.client.call(["profile", "pubkey", id])); }, cx);
   }
   register(id, name, session, cx) {
     if (!this.requireProfile(id, cx)) return;
-    if (!validName(name) || !this.tests[id]?.server.exports.includes(session)) {
+    if (!validName(name) || !this.tests.get(id)?.server.exports.includes(session)) {
       this.error = { message: "Enter a valid machine name and choose a session from a successful test.", hint: "Use 1–32 lowercase letters, digits, _, . or -; terminal ids such as t7 are reserved." }; cx.notify(); return;
     }
     this.perform("Registering " + name + "…", async () => {
@@ -237,7 +244,7 @@ export default class Tailcat extends View {
         await this.client.call(["profile", "unregister", action.id, "--name", action.name]);
       } else {
         await this.client.call(["profile", "rm", action.id, ...(action.force ? ["--force"] : [])]);
-        delete this.keys[action.id]; delete this.tests[action.id];
+        this.keys.delete(action.id); this.tests.delete(action.id);
       }
       await this.loadProfiles();
     }, cx);
@@ -329,7 +336,7 @@ export default class Tailcat extends View {
     this.queue = [];
     for (const waiter of this.waiters) waiter.finish();
     this.clearReveal?.();
-    this.keys = {}; this.tests = {};
+    this.keys = new Map(); this.tests = new Map();
     if (this.revealOverlay) closeOverlay(this.revealOverlay);
   }
 
@@ -376,8 +383,8 @@ export default class Tailcat extends View {
   connectionPage(t) {
     const own = ownMachines(this.profiles, machines());
     const p = this.profile(this.selected);
-    const result = this.tests[this.selected];
-    const key = this.keys[this.selected];
+    const result = this.tests.get(this.selected);
+    const key = this.keys.get(this.selected);
     return [
       ...(!this.localReady() ? [note("Waiting for App to connect to its local core…", t.muted)] : []),
       card().child(div().font_semibold().child("Profiles"))

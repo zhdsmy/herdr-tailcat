@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -115,27 +116,15 @@ func serverManage(ctx context.Context, home string, args []string) (map[string]a
 		if args[1] != "rm" {
 			return nil, nil, usage("unknown allow command")
 		}
-		keys, e := allow.Read(path, true)
+		emptied, e := serve.AllowRemove(home, args[2])
 		if e != nil {
-			return nil, nil, e
-		}
-		out := ""
-		found := false
-		for _, x := range keys {
-			if x == k {
-				found = true
-			} else {
-				out += x.String() + "\n"
+			if errors.Is(e, serve.ErrNotAllowed) {
+				return nil, nil, fail("not_found", "client key is not allowed", "")
 			}
-		}
-		if !found {
-			return nil, nil, fail("not_found", "client key is not allowed", "")
-		}
-		if e = store.WriteFile(path, []byte(out)); e != nil {
 			return nil, nil, e
 		}
 		result["warning"] = ""
-		if out == "" {
+		if emptied {
 			result["warning"] = "Whitelist is empty; serve will refuse to start until a client is allowed."
 		}
 		return result, nil, nil
@@ -160,20 +149,13 @@ func serverManage(ctx context.Context, home string, args []string) (map[string]a
 		if args[1] != "rm" {
 			return nil, nil, usage("unknown export command")
 		}
-		out := []string{}
-		found := false
-		for _, x := range cfg.Exports {
-			if x == args[2] {
-				found = true
-			} else {
-				out = append(out, x)
+		if e := serve.ExportRemove(home, args[2]); e != nil {
+			if errors.Is(e, serve.ErrNotExported) {
+				return nil, nil, fail("not_found", "session is not exported", "")
 			}
+			return nil, nil, e
 		}
-		if !found {
-			return nil, nil, fail("not_found", "session is not exported", "")
-		}
-		cfg.Exports = out
-		return result, nil, store.WriteJSON(path, cfg)
+		return result, nil, nil
 	default:
 		return nil, nil, usage("unknown server command")
 	}

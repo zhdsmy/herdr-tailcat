@@ -392,3 +392,16 @@ func TestMalformedCoreListCannotAuthorizeRemoval(t *testing.T) {
 		}
 	}
 }
+
+func TestServerRemovalNotFoundContract(t *testing.T) {
+	setupCLI(t)
+	for _, args := range [][]string{
+		{"server", "allow", "rm", key.NewNode().Public().String()},
+		{"server", "export", "rm", "tc-missing"},
+	} {
+		result, err, _ := invoke(t, args...)
+		if err == nil || result["error"].(map[string]any)["kind"] != "not_found" {
+			t.Fatal(result, err)
+		}
+	}
+}

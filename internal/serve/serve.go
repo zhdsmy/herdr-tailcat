@@ -69,9 +69,27 @@ func Run() error {
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sem := make(chan struct{}, cfg.MaxConns)
+
 	idle, _ := clientIdle(cfg) // Load already validated this setting.
 	streams := newManager(idle, logger)
+	streams.sem = make(chan struct{}, cfg.MaxConns)
+	streams.replacements = make(chan struct{}, replacementSlots)
+	streams.allowed = make(map[string]bool)
+	for _, k := range s.AllowedClients {
+		streams.allowed[k.String()] = true
+	}
+	connectionHandler := streams.handler(ctx, cfg, func(c net.Conn) string {
+		for _, entry := range s.PeerEnv(c.LocalAddr(), c.RemoteAddr()) {
+			if strings.HasPrefix(entry, "TAILCAT_PEER_KEY=") {
+				// Log only the first 8 hex characters of the public key.
+				if v := strings.TrimPrefix(entry, "TAILCAT_PEER_KEY=nodekey:"); len(v) >= 8 {
+					logger.Printf("accepted peer %s", v[:8])
+				}
+				return strings.TrimPrefix(entry, "TAILCAT_PEER_KEY=")
+			}
+		}
+		return ""
+	})
 	var wg sync.WaitGroup
 	var lifecycle sync.Mutex
 	closing := false
@@ -89,30 +107,7 @@ func Run() error {
 			wg.Add(1)
 			lifecycle.Unlock()
 			defer wg.Done()
-			if !admit(c, sem) {
-				return
-			}
-			defer func() { <-sem }()
-			done := make(chan struct{})
-			defer close(done)
-			go func() {
-				select {
-				case <-ctx.Done():
-					c.Close()
-				case <-done:
-				}
-			}()
-			peerKey := ""
-			for _, entry := range s.PeerEnv(c.LocalAddr(), c.RemoteAddr()) {
-				if strings.HasPrefix(entry, "TAILCAT_PEER_KEY=") {
-					peerKey = strings.TrimPrefix(entry, "TAILCAT_PEER_KEY=")
-					v := strings.TrimPrefix(entry, "TAILCAT_PEER_KEY=nodekey:")
-					if len(v) >= 8 {
-						logger.Printf("accepted peer %s", v[:8])
-					}
-				}
-			}
-			streams.handle(ctx, c, cfg, peerKey, proto.Timeout)
+			connectionHandler(c)
 		}
 	}
 	if e = s.Start(); e != nil {
@@ -194,6 +189,9 @@ func Handle(ctx context.Context, c net.Conn, cfg store.ServerConfig, logger *log
 	newManager(idle, logger).handle(ctx, c, cfg, "", timeout)
 }
 func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerConfig, peerKey string, timeout time.Duration) {
+	m.handleAdmitted(parent, c, cfg, peerKey, timeout, nil)
+}
+func (m *manager) handleAdmitted(parent context.Context, c net.Conn, cfg store.ServerConfig, peerKey string, timeout time.Duration, a *admission) {
 	logger := m.logger
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -214,6 +212,9 @@ func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerCon
 		proto.Fail(c, e)
 		return
 	}
+	// Bound the reply too: a replacement peer cannot hold its temporary token
+	// indefinitely by sending a valid request and refusing to read the response.
+	_ = c.SetWriteDeadline(time.Now().Add(timeout))
 	info := &proto.Info{Version: version.String(), Exports: cfg.Exports}
 	if q.Op == "ping" {
 		if os.Getenv("HERDR_TAILCAT_TRACE_EXIT") == "1" {
@@ -234,6 +235,10 @@ func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerCon
 	}
 	if !line.ValidName(session) || !found {
 		proto.Fail(c, fmt.Errorf("session %q is not exported by this server", session))
+		return
+	}
+	if a != nil && a.replacement && !m.canReplace(peerKey, session) {
+		busy(c)
 		return
 	}
 	cmd := exec.Command(cfg.HerdrCore, "connect", "--session", session)
@@ -278,6 +283,17 @@ func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerCon
 		}
 		_, _ = io.Copy(io.Discard, errpipe)
 	}()
+	own, accepted := m.install(peerKey, session, cancel, a)
+	if !accepted {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		in.Close()
+		out.Close()
+		_ = cmd.Wait()
+		busy(c)
+		return
+	}
+	defer m.finish(peerKey, session, own)
+
 	if e = proto.Write(c, proto.Response{Version: proto.Version, OK: true, Server: info}); e != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		in.Close()
@@ -287,8 +303,8 @@ func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerCon
 	}
 	m.active.Add(1)
 	defer m.active.Add(-1)
-	release := m.install(peerKey, session, cancel)
-	defer release()
+	_ = c.SetWriteDeadline(time.Time{})
+	m.commit(own)
 	activity := &activity{last: time.Now()}
 	go m.watch(ctx, cancel, activity, m.sequence.Add(1))
 	done := make(chan int, 2)
@@ -332,15 +348,30 @@ func (m *manager) handle(parent context.Context, c net.Conn, cfg store.ServerCon
 	}
 }
 
-// admit bounds active streams and gives overload a bounded, actionable reply.
-func admit(c net.Conn, sem chan struct{}) bool {
-	select {
-	case sem <- struct{}{}:
-		return true
-	default:
-		defer c.Close()
-		_ = c.SetWriteDeadline(time.Now().Add(time.Second))
-		proto.Fail(c, errors.New("server busy"))
-		return false
+// handler is the production entry point, shared by OnTCP and capacity tests.
+func (m *manager) handler(ctx context.Context, cfg store.ServerConfig, peerOf func(net.Conn) string) func(net.Conn) {
+	return func(c net.Conn) {
+		peer := peerOf(c)
+		a := m.admit(peer)
+		if a == nil {
+			busy(c)
+			return
+		}
+		defer m.free(a)
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				c.Close()
+			case <-done:
+			}
+		}()
+		m.handleAdmitted(ctx, c, cfg, peer, proto.Timeout, a)
 	}
+}
+func busy(c net.Conn) {
+	defer c.Close()
+	_ = c.SetWriteDeadline(time.Now().Add(time.Second))
+	proto.Fail(c, errors.New("server busy"))
 }

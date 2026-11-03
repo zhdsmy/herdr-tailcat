@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import Tailcat from "../mods/tailcat/main.js";
+import { register } from "node:module";
+register("./app-loader.mjs", import.meta.url);
+const { default: Tailcat } = await import("../mods/tailcat/main.js");
 import { host, reset, context } from "./app-host.mjs";
 const drain = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate); };
 async function view() { const panel = new Tailcat(); panel.init({}, context()); await drain(); return panel; }
@@ -22,7 +24,7 @@ test("prompt terminal argv/props contain only id and executable; refresh display
   assert.equal(spec.layout.children[1].content.terminal, "t1");
   host.profiles.push({ ...host.profiles[0], id: "new-profile", machines: [] });
   panel.refresh(context()); await drain();
-  assert.equal(panel.selected, "new-profile"); assert.ok(panel.keys["new-profile"].public_key.startsWith("nodekey:"));
+  assert.equal(panel.selected, "new-profile"); assert.ok(panel.keys.get("new-profile").public_key.startsWith("nodekey:"));
   assert.ok(!JSON.stringify(host.calls).includes(host.reveal));
   panel.close();
 });
@@ -51,7 +53,7 @@ test("only own machine can open/remove; force deletion needs confirmation", asyn
 test("shown command loop tests/registers through JSON without unrelated machine operations", async () => {
   reset(); const panel = await view();
   host.commands.shift()("test:home"); await drain();
-  assert.deepEqual(panel.tests.home.server.exports, ["work"]);
+  assert.deepEqual(panel.tests.get("home").server.exports, ["work"]);
   host.commands.shift()("register:home:work:new-box"); await drain();
   assert.ok(host.calls.find((c) => c.args.join(" ") === "profile register home --name new-box --session work --json"));
   assert.ok(!JSON.stringify(host.calls).includes("ssh-box")); panel.close();
@@ -122,7 +124,7 @@ test('pending confirmation gates FIFO work; confirm and cancel resolve the gate'
     const before = host.calls.length;
     host.timers.find((t) => t.ms === 5000).fn(context()); assert.equal(host.calls.length, before);
     panel.enqueue(resolve, context()); await drain();
-    assert.equal(panel.queue.length, 0); assert.equal(panel.pending, null); assert.ok(panel.tests.home);
+    assert.equal(panel.queue.length, 0); assert.equal(panel.pending, null); assert.ok(panel.tests.get("home"));
     assert.equal(host.calls.some((c) => c.args[1] === 'unregister'), resolve === 'confirm');
     panel.close();
   }
@@ -235,7 +237,7 @@ test('quiet polling keeps controls enabled, unchanged data does not notify, and 
   release(); await drain(); assert.equal(host.notifications,before);
   host.hold = new Promise(r=>{release=r;}); panel.refresh(context(),true);
   click(panel,'tc-test'); assert.equal(panel.queue.length,1); assert.equal(panel.busy,'');
-  release(); await drain(); assert.equal(panel.queue.length,0); assert.ok(panel.tests.home); panel.close();
+  release(); await drain(); assert.equal(panel.queue.length,0); assert.ok(panel.tests.get("home")); panel.close();
 });
 test('quiet failure preserves feedback in fixed height area; manual refresh remains busy', async () => {
   reset(); const panel=await view(); const error={message:'Existing error',hint:'Try later'};
@@ -246,4 +248,43 @@ test('quiet failure preserves feedback in fixed height area; manual refresh rema
   host.failExec=false; let release; host.hold=new Promise(r=>{release=r;}); click(panel,'tc-refresh');
   assert.equal(panel.busy,'Refreshing…'); assert.equal(find(panel.render(context()),'tc-feedback').attrs.h[0],24);
   release(); await drain(); assert.equal(panel.refreshFailed,false); panel.close();
+});
+
+test("prototype profile ids render, select, test and show a public key", async () => {
+  reset();
+  host.profiles = [{ ...host.profiles[0], id: "constructor", machines: [] }];
+  const panel = await view();
+  assert.equal(panel.selected, "constructor");
+  assert.ok(!renderedText(panel.render(context())).includes(" ms · "));
+  // Leading underscores remain invalid input. Inject that id into public view
+  // state to exercise its lookup paths without changing the naming contract.
+  panel.profiles.push({ ...panel.profiles[0], id: "__proto__" });
+  for (const id of ["constructor", "__proto__"]) {
+    click(panel, "tc-profile-" + id);
+    assert.equal(panel.selected, id);
+    assert.ok(!renderedText(panel.render(context())).includes(" ms · "));
+    assert.equal(find(panel.render(context()), "tc-session-work"), undefined);
+    click(panel, "tc-test"); await drain();
+    assert.match(renderedText(panel.render(context())), /12\.0 ms/);
+    click(panel, "tc-public-key"); await drain();
+    assert.match(renderedText(panel.render(context())), /nodekey:/);
+    assert.equal(panel.error, null);
+  }
+  panel.close();
+});
+for (const verb of ["confirm", "cancel"]) test(verb + " resolves a full command queue", async () => {
+  reset(); const panel = await view();
+  click(panel, "tc-unregister-box");
+  const order = [];
+  for (let i = 0; i < 16; i++) panel.enqueue(() => order.push(i), context());
+  assert.equal(panel.queue.length, 16);
+  panel.enqueue("refresh", context());
+  assert.match(panel.error.message, /command queue is full \(16\)/);
+  assert.equal(panel.queue.length, 16);
+  const before = host.calls.filter((c) => c.args[1] === "unregister").length;
+  panel.enqueue(verb, context()); await drain();
+  assert.equal(panel.pending, null);
+  assert.equal(host.calls.filter((c) => c.args[1] === "unregister").length, before + (verb === "confirm" ? 1 : 0));
+  assert.deepEqual(order, Array.from({length:16}, (_, i) => i));
+  panel.close();
 });
