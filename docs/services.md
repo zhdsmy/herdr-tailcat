@@ -10,9 +10,10 @@ Runtime tests copy the built binary and core into a private scratch bin director
 On macOS:
 
     herdr-tailcat server install-service --label dev.herdr.tailcat --dry-run
-    herdr-tailcat server install-service --label dev.herdr.tailcat --plist-dir /absolute/chosen/directory
+    herdr-tailcat server install-service --label dev.herdr.tailcat
+    herdr-tailcat server service start --label dev.herdr.tailcat
 
-The second command creates the plist and private 0600 stdout/stderr logs, then prints the plist path. Use server service start/stop/status --label <label> --plist-dir <directory>. Start defaults to ~/Library/LaunchAgents when --plist-dir is omitted. Generation is separate from loading. Runtime tests only load random test labels from scratch directories.
+The second command writes the plist and private 0600 stdout/stderr logs, then prints the plist path; it never calls launchctl. The third loads it. install-service and server service start share the same --plist-dir default, ~/Library/LaunchAgents; pass the same --plist-dir <directory> to both when using another directory. Generation is separate from loading. Runtime tests only load random test labels from scratch directories.
 
 The plist records HERDR_TAILCAT_HOME, XDG_STATE_HOME, XDG_CONFIG_HOME and XDG_RUNTIME_DIR, HOME and a PATH containing only the configured core directory and /usr/bin:/bin:/usr/sbin:/sbin, and an absolute binary path. Set XDG variables before generation to match the core you intend to export. An unset runtime directory is written empty so core retains its normal platform fallback. HC_SESSION, when explicitly set, is retained for the serve process; exported connect children still select their own session. Arbitrary inherited environment, TS_DEBUG_* and keys are not copied. Only explicit --force-derp writes TS_DEBUG_ALWAYS_USE_DERP=true.
 

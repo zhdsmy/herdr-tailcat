@@ -3,6 +3,28 @@
 
 Default core reconnect/heartbeat timings are always used. On an architectural
 conflict this runner preserves evidence, cleans scratch, and exits with a review-needed status.
+
+The lab runs a scratch client core, a scratch serve and two scratch remote
+sessions (tc-work, tc-other) behind profile p1. Each case injects one fault and
+checks that only the affected line recovers, without touching unrelated ones.
+
+  K1   kill one via process; the line reconnects, the other is unaffected
+  K2a  SIGKILL the client core; via, connect and daemon processes all exit
+  K2b  via exits on parent loss and on stdin EOF (full matrix only)
+  K3   SIGKILL the profile daemon; lines rebuild through a new daemon
+  K3b  idle connect streams are reaped after the default 90s (full matrix only)
+  K4   SIGKILL serve (crash, no FIN); lines recover after core detection
+  K4b  SIGTERM serve (planned restart); streams drain and recover promptly
+  K5   restart one remote core; only its line reconnects
+  K6   stop one remote core; its line ends, the other session is unaffected
+  K7   restart the client core; via processes exit and lines are restored
+  K8   freeze serve for 60s (SIGSTOP), then resume
+  K9   remove registered machines; their via and connect processes exit
+  S1   5-minute stability sample
+  S2   20 cold dials
+  L1   serve hosted by a random test launchd label from a scratch plist dir
+
+Without --only the full matrix runs every case in order.
 """
 import argparse
 import datetime
@@ -1037,8 +1059,8 @@ class Lab:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--only",help="development subset, e.g. K5,K6,K7; omitted runs full default matrix")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--only",help="comma-separated case IDs from the table above (K1,K2a,K3,K4,K4b,K5,K6,K7,K8,K9,S1,S2,L1); omitted runs the full matrix")
     args=parser.parse_args()
     lab = Lab()
     code = 0

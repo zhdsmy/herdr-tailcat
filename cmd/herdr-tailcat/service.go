@@ -66,8 +66,9 @@ func serviceInstall(args []string) (map[string]any, *string, error) {
 	if *dry || *target == "linux" {
 		return map[string]any{"text": string(text), "os": *target}, ptr(string(text)), nil
 	}
+	// Same default as service start, so the two commands agree on the plist.
 	if *dir == "" {
-		return nil, nil, usage("--plist-dir is required; files are generated only, never loaded")
+		*dir = filepath.Join(userHome, "Library", "LaunchAgents")
 	}
 	path, err := service.WritePlist(options, *dir, text)
 	if err != nil {

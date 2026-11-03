@@ -23,14 +23,14 @@ The local core starts via as a stdio transport. A per-profile daemon shares a pe
 Install herdr-core on both computers and Herdr App on the client. Put hc on PATH. Install the same herdr-tailcat release on both computers:
 
 ~~~sh
-go install github.com/zhdsmy/herdr-tailcat/cmd/herdr-tailcat@v0.0.1
+go install github.com/zhdsmy/herdr-tailcat/cmd/herdr-tailcat@v0.0.2
 ~~~
 
 With a checkout and Go 1.27 or newer:
 
 ~~~sh
 mkdir -p "$HOME/.local/bin"
-go build -trimpath -ldflags '-X github.com/zhdsmy/herdr-tailcat/internal/version.Build=v0.0.1' -o "$HOME/.local/bin/herdr-tailcat" ./cmd/herdr-tailcat
+go build -trimpath -ldflags '-X github.com/zhdsmy/herdr-tailcat/internal/version.Build=v0.0.2' -o "$HOME/.local/bin/herdr-tailcat" ./cmd/herdr-tailcat
 ~~~
 
 Add the installation directory to PATH. On macOS, keep both installed executables outside Documents, Desktop and Downloads, including symlink targets. Tailscale reads its executable during startup; protected folders can trigger a privacy prompt and stall launchd. Service generation rejects such locations.
@@ -145,6 +145,8 @@ LC_ALL=C python3 scripts/fault-matrix.py --only K1,K2a,K4,K4b,K7,L1
 python3 scripts/cli-e2e.py
 python3 scripts/prompt-e2e.py
 ~~~
+
+The --only subset above is a quicker check: kill a via process (K1), crash the client core (K2a), crash and restart serve (K4, K4b), restart the client core (K7) and run serve under launchd (L1). Omit --only for the full matrix, which adds a 5-minute stability run and 20 cold dials. Case IDs are listed in the docstring of scripts/fault-matrix.py and in `--help`.
 
 Native mod checks use a private HERDR_APP_HOME and never open or install into a real App window. Some App versions generate ignored type stubs next to the checked mod.
 

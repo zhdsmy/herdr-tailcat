@@ -74,6 +74,32 @@ func TestServiceBinaryResolvesProtectedDirectoryAndHome(t *testing.T) {
 	}
 }
 
+// The test binary runs from the Go build cache, never a protected folder.
+func TestServiceInstallDefaultsToLaunchAgents(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	home := filepath.Join(root, "tailcat")
+	t.Setenv("HERDR_TAILCAT_HOME", home)
+	t.Setenv("HC_SESSION", "tc-service-test")
+	for _, key := range []string{"XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR"} {
+		t.Setenv(key, filepath.Join(root, key))
+	}
+	if err := os.MkdirAll(filepath.Join(home, "server"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := `{"herdr_core":"/usr/local/bin/herdr-core","exports":["default"]}`
+	if err := os.WriteFile(filepath.Join(home, "server", "config.json"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	label := "dev.herdr-tailcat.test.default-dir"
+	if err := run([]string{"server", "install-service", "--label", label, "--os", "darwin"}); err != nil {
+		t.Fatal("install-service without --plist-dir failed", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Library", "LaunchAgents", label+".plist")); err != nil {
+		t.Fatal("plist not written to ~/Library/LaunchAgents", err)
+	}
+}
+
 func TestServiceDryRunDoesNotCreateHome(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "absent")
