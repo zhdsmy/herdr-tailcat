@@ -27,7 +27,7 @@ export function parseResult(args, r) {
   if (r.code !== 0 || v.ok !== true) throw new CLIError("protocol", "Invalid CLI response.");
   const cmd = args.slice(0, 2).join(" ");
   switch (cmd) {
-    case "profile ls": return { profiles: array(v.profiles, (p) => ({ id: name(p.id), client_fingerprint: fp(p.client_fingerprint), server_fingerprint: fp(p.server_fingerprint), daemon_running: flag(p.daemon_running), machines: array(p.machines, machine) })) };
+    case "profile ls": return { profiles: array(v.profiles, (p) => ({ id: name(p.id), ...(typeof p.profile_identity === "string" && /^[a-f0-9]{64}$/.test(p.profile_identity) ? { profile_identity: p.profile_identity } : {}), client_fingerprint: fp(p.client_fingerprint), server_fingerprint: fp(p.server_fingerprint), daemon_running: flag(p.daemon_running), machines: array(p.machines, machine) })) };
     case "profile pubkey": return { public_key: pubkey(v.public_key), fingerprint: fp(v.fingerprint) };
     case "profile test": return { rtt_ms: number(v.rtt_ms), server: { version: text(v.server.version), exports: array(v.server.exports, name) } };
     case "profile register": return { machine: machine(v.machine) };

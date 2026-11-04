@@ -87,7 +87,14 @@ func TestServiceInstallDefaultsToLaunchAgents(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, "server"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	config := `{"herdr_core":"/usr/local/bin/herdr-core","exports":["default"]}`
+	core := filepath.Join(root, "bin", "herdr-core")
+	if err := os.MkdirAll(filepath.Dir(core), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(core, nil, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := "{\"herdr_core\":\"" + core + "\",\"exports\":[\"default\"]}"
 	if err := os.WriteFile(filepath.Join(home, "server", "config.json"), []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}

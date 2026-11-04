@@ -38,6 +38,7 @@ export async function exec(command, args) {
   if (host.failExec) throw Error("refresh failed");
   if (command === "/usr/bin/which") return { code: 0, stdout: "/demo/bin/herdr-tailcat\n", stderr: "" };
   const [group, action, id] = args;
+  if (group === "server" && action === "status") return result({ok:true,initialized:false,running:false,pid:0,started_at:"",version:"v1",exports:[],allowed_clients:0,streams:0,restart_required:false,service:null});
   if (group === "server" && action === "show-address") return result({ address: host.reveal });
   if (group === "profile" && action === "ls") return result({ ok: true, profiles: host.profiles });
   if (group === "profile" && action === "test") return result({ ok: true, rtt_ms: 12, server: { version: "v1", exports: ["work"] } });

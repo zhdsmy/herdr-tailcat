@@ -288,3 +288,87 @@ for (const verb of ["confirm", "cancel"]) test(verb + " resolves a full command 
   assert.deepEqual(order, Array.from({length:16}, (_, i) => i));
   panel.close();
 });
+
+test('initial readiness recovery loads before queued test, unregister and page', async () => {
+ reset();host.live[0].layout='loading';const panel=await view();
+ for(const command of ['test:home','unregister:home:box','page:server']) panel.enqueue(command,context());
+ assert.equal(host.calls.length,0);
+ host.live[0].layout='ready';host.timers.find(t=>t.ms===5000).fn(context());await drain();
+ assert.equal(panel.profilesLoaded,true);assert.ok(panel.tests.get('home'));assert.equal(panel.pending?.name,'box');
+ panel.enqueue('cancel',context());await drain();assert.equal(panel.page,'server');panel.close();
+});
+test('script refresh recovers a failed first load without a retry loop',async()=>{
+ reset();host.failExec=true;const panel=await view();const count=host.calls.length;
+ await drain();assert.equal(host.calls.length,count);
+ host.failExec=false;panel.enqueue('test:home',context());panel.enqueue('refresh',context());await drain();
+ assert.equal(panel.profilesLoaded,true);assert.ok(panel.tests.get('home'));panel.close();
+});
+for(const target of ['rm:home:force','unregister:home:box']) test('unbound or extra confirm cannot authorize next '+target,async()=>{
+ for(const extra of [false,true]) {
+  reset();if(extra)host.profiles.push({...host.profiles[0],id:"other",machines:[]});const panel=await view();let release;
+  if(extra){panel.enqueue('rm:other',context());host.hold=new Promise(r=>{release=r;});panel.enqueue('confirm',context());}
+  else {host.hold=new Promise(r=>{release=r;});panel.refresh(context());}
+  panel.enqueue('confirm',context());panel.enqueue(target,context());
+  release();await drain();
+  assert.ok(panel.pending,'next destructive action must display a confirmation card');
+  assert.ok(find(panel.render(context()),'tc-confirm-yes'));
+  assert.equal(host.calls.filter(c=>c.args[1]==='rm').length,extra?1:0);
+  assert.equal(host.calls.filter(c=>c.args[1]==='unregister').length,0);
+  panel.close();
+ }
+});
+for(const state of ['busy','refreshing','failed','pending']) test('gate command storage stays bounded in '+state,async()=>{
+ reset();if(state==='failed')host.failExec=true;const panel=await view();let release;
+ if(state==='busy'||state==='refreshing'){host.hold=new Promise(r=>{release=r;});panel.refresh(context(),state==='refreshing');}
+ if(state==='pending'){panel.enqueue('rm:home',context());panel.busy='held';}
+ for(let i=0;i<1000;i++)panel.enqueue(i%2?'cancel':'confirm',context());
+ assert.ok(panel.queue.length<=16,'ordinary FIFO remains bounded');
+ assert.ok(!Array.isArray(panel.gate),'gate has a fixed single slot');
+ panel.close();release?.();await drain();assert.equal(panel.queue.length,0);assert.equal(panel.pending,null);
+});
+for(const first of ['confirm','cancel']) test('gate first '+first+' is tied to its action and preserves FIFO',async()=>{
+ reset();host.profiles.push({...host.profiles[0],id:'other',machines:[]});const panel=await view();panel.enqueue('rm:other',context());panel.busy='held';
+ const order=[];for(let i=0;i<16;i++)panel.enqueue(()=>order.push(i),context());
+ panel.enqueue(first,context());panel.enqueue(first==='cancel'?'confirm':'cancel',context());panel.busy='';panel.drainQueue(context());await drain();
+ assert.equal(panel.pending,null);assert.deepEqual(order,Array.from({length:16},(_,i)=>i));assert.equal(host.calls.filter(c=>c.args[1]==='rm').length,first==='confirm'?1:0);
+ panel.enqueue('rm:home',context());assert.ok(panel.pending);panel.close();
+});
+
+for(const change of ['client','server','full-identity']) test('profile cache invalidates after '+change+' replacement',async()=>{
+ reset();host.profiles[0].profile_identity='c'.repeat(64);const panel=await view();
+ panel.test('home',context());await drain();panel.pubkey('home',context());await drain();
+ const before=host.notifications;panel.refresh(context(),true);await drain();
+ assert.ok(panel.tests.get('home'));assert.ok(panel.keys.get('home'));assert.equal(host.notifications,before);
+ host.profiles[0]={...host.profiles[0],profile_identity:'d'.repeat(64)};
+ if(change!=='full-identity')host.profiles[0][change+'_fingerprint']='eeeeeeee';
+ panel.refresh(context(),true);await drain();
+ assert.equal(panel.tests.has('home'),false);assert.equal(panel.keys.has('home'),false);assert.equal(panel.session,'');
+ assert.equal(find(panel.render(context()),'tc-register').handlers.on_click,undefined);panel.close();
+});
+test('profile deletion and recreation resets selection and export session',async()=>{
+ reset();host.profiles[0].profile_identity='c'.repeat(64);const original={...host.profiles[0]};const panel=await view();
+ panel.test('home',context());await drain();panel.pubkey('home',context());await drain();
+ host.profiles=[];panel.refresh(context(),true);await drain();
+ assert.equal(panel.selected,'');assert.equal(panel.session,'');assert.equal(panel.keys.size,0);assert.equal(panel.tests.size,0);
+ host.profiles=[{...original,profile_identity:'d'.repeat(64)}];panel.refresh(context(),true);await drain();
+ assert.equal(panel.selected,'home');assert.equal(panel.session,'');assert.equal(panel.tests.size,0);panel.close();
+});
+test('old CLI without a complete profile identity discards cached evidence on refresh',async()=>{
+ reset();const panel=await view();panel.test('home',context());await drain();panel.pubkey('home',context());await drain();
+ panel.refresh(context(),true);await drain();assert.equal(panel.tests.size,0);assert.equal(panel.keys.size,0);assert.equal(panel.session,'');panel.close();
+});
+
+for(const target of ['rm:home:force','unregister:home:box']) test('responses queued before any visible card cannot confirm deferred '+target,async()=>{
+ reset();host.profiles.push({...host.profiles[0],id:'other',machines:[]});const panel=await view();let release;
+ host.hold=new Promise(r=>{release=r;});panel.refresh(context(),true);
+ panel.enqueue('rm:other',context());panel.enqueue(target,context());
+ // Both responses arrive while refresh is in progress and no card exists.
+ panel.enqueue('confirm',context());panel.enqueue('confirm',context());
+ release();await drain();
+ assert.equal(host.calls.filter(c=>['rm','unregister'].includes(c.args[1])).length,0,'pre-card responses executed a deletion');
+ assert.equal(panel.pending?.id,'other');assert.ok(find(panel.render(context()),'tc-confirm-yes'));
+ panel.enqueue('confirm',context());await drain();
+ assert.equal(panel.pending?.id,'home','surplus response automatically confirmed the following action');
+ assert.equal(host.calls.filter(c=>c.args[1]==='rm').length,1);assert.equal(host.calls.filter(c=>c.args[1]==='unregister').length,0);
+ panel.close();
+});

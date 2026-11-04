@@ -26,10 +26,13 @@ import (
 	"tailscale.com/types/key"
 )
 
-func AddProfile(dir, text string) error {
-	if _, e := os.Stat(filepath.Join(dir, "profile.json")); e == nil {
-		return errors.New("profile already exists")
-	}
+var ErrProfileExists = errors.New("profile already exists")
+
+func AddProfile(dir, text string) error { return AddProfileContext(context.Background(), dir, text) }
+func AddProfileContext(ctx context.Context, dir, text string) error {
+	return addProfile(ctx, dir, text, store.WriteJSON)
+}
+func addProfile(ctx context.Context, dir, text string, write func(string, any) error) error {
 	text = strings.TrimSpace(text)
 	ci, e := tailcat.ParseAddr(tailcat.Addr(text))
 	if e != nil {
@@ -41,10 +44,41 @@ func AddProfile(dir, text string) error {
 	if ci.PresharedKey.IsZero() {
 		return errors.New("tailcat address must contain a preshared key")
 	}
-	if e = store.WriteJSON(filepath.Join(dir, "client.key"), key.NewNode()); e != nil {
+	lock, e := store.ProfileLock(ctx, dir)
+	if e != nil {
 		return e
 	}
-	return store.WriteJSON(filepath.Join(dir, "profile.json"), store.Profile{Address: text})
+	defer lock.Close()
+	if _, e = os.Stat(filepath.Join(dir, "profile.json")); e == nil {
+		return ErrProfileExists
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	// Never overwrite an incomplete legacy directory or a live/unverified lock.
+	if _, e = os.Stat(dir); e == nil {
+		return errors.New("incomplete profile directory; remove it before importing again")
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
+		return e
+	}
+	stage, e := os.MkdirTemp(filepath.Dir(dir), ".create-"+filepath.Base(dir)+"-")
+	if e != nil {
+		return e
+	}
+	defer os.RemoveAll(stage)
+	if e = write(filepath.Join(stage, "client.key"), key.NewNode()); e != nil {
+		return e
+	}
+	if e = write(filepath.Join(stage, "profile.json"), store.Profile{Address: text}); e != nil {
+		return e
+	}
+	if e = ctx.Err(); e != nil {
+		return e
+	}
+	// Publish both files together. Failed writes leave no visible profile or key.
+	return os.Rename(stage, dir)
 }
 func PublicKey(dir string) (string, error) {
 	var k key.NodePrivate
@@ -61,7 +95,8 @@ func (t *tailDial) Dial(ctx context.Context) (net.Conn, error) {
 }
 func (t *tailDial) Ping(ctx context.Context) error { _, e := t.c.Ping(ctx); return e }
 func (t *tailDial) Close() error                   { return t.c.Close() }
-func Run(id string) error {
+func Run(id string) error                          { return run(id, nil) }
+func run(id string, makeEngine func(store.Profile, key.NodePrivate) *Engine) error {
 	if !line.ValidName(id) {
 		return errors.New("invalid profile id")
 	}
@@ -70,6 +105,14 @@ func Run(id string) error {
 		return e
 	}
 	dir := filepath.Join(home, "profiles", id)
+	lifecycle, e := store.ProfileLock(context.Background(), dir)
+	if e != nil {
+		return e
+	}
+	defer lifecycle.Close()
+	if _, e = os.Stat(filepath.Join(dir, "profile.json")); e != nil {
+		return errors.New("cannot read profile or identity")
+	}
 	lock, e := runstate.Acquire(dir, "daemon")
 	if e != nil {
 		return errors.New("profile daemon is already running")
@@ -86,13 +129,18 @@ func Run(id string) error {
 	}
 	psk, _ := ci.PresharedKey.MarshalText()
 	redact.Add(p.Address, string(psk), strings.TrimPrefix(string(psk), "psk:"))
-	var created atomic.Uint64
-	engine := NewEngine(func() Dialer {
-		if n := created.Add(1); n > 1 {
-			fmt.Fprintf(os.Stderr, "client rebuilt generation=%d\n", n-1)
+	if makeEngine == nil {
+		makeEngine = func(p store.Profile, k key.NodePrivate) *Engine {
+			var created atomic.Uint64
+			return NewEngine(func() Dialer {
+				if n := created.Add(1); n > 1 {
+					fmt.Fprintf(os.Stderr, "client rebuilt generation=%d\n", n-1)
+				}
+				return &tailDial{&tailcat.Client{Server: tailcat.Addr(p.Address), Key: k, Logf: func(string, ...any) {}}}
+			})
 		}
-		return &tailDial{&tailcat.Client{Server: tailcat.Addr(p.Address), Key: k, Logf: func(string, ...any) {}}}
-	})
+	}
+	engine := makeEngine(p, k)
 	defer engine.Close()
 	path := filepath.Join(dir, "daemon.sock")
 	_ = os.Remove(path)
@@ -122,6 +170,8 @@ func Run(id string) error {
 	if e = runstate.Write(dir, "daemon", state); e != nil {
 		return e
 	}
+	// Publish socket and state before allowing removal or another startup.
+	lifecycle.Close()
 	return runLocal(ctx, cancel, ln, engine, idle)
 }
 

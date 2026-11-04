@@ -23,14 +23,14 @@ The local core starts via as a stdio transport. A per-profile daemon shares a pe
 Install herdr-core on both computers and Herdr App on the client. Put hc on PATH. Install the same herdr-tailcat release on both computers:
 
 ~~~sh
-go install github.com/zhdsmy/herdr-tailcat/cmd/herdr-tailcat@v0.0.3
+go install github.com/zhdsmy/herdr-tailcat/cmd/herdr-tailcat@v0.0.4
 ~~~
 
 With a checkout and Go 1.27 or newer:
 
 ~~~sh
 mkdir -p "$HOME/.local/bin"
-go build -trimpath -ldflags '-X github.com/zhdsmy/herdr-tailcat/internal/version.Build=v0.0.3' -o "$HOME/.local/bin/herdr-tailcat" ./cmd/herdr-tailcat
+go build -trimpath -ldflags '-X github.com/zhdsmy/herdr-tailcat/internal/version.Build=v0.0.4' -o "$HOME/.local/bin/herdr-tailcat" ./cmd/herdr-tailcat
 ~~~
 
 Add the installation directory to PATH. On macOS, keep both installed executables outside Documents, Desktop and Downloads, including symlink targets. Tailscale reads its executable during startup; protected folders can trigger a privacy prompt and stall launchd. Service generation rejects such locations.
@@ -112,7 +112,7 @@ The package contains no layouts folder and does not replace the current layout. 
 
 - Tailcat encrypts the transport. The server address contains a PSK; each client also needs an explicitly allowed public key. The whitelist is validated before startup and an empty whitelist fails closed.
 - Only TCP port 6470 has an application handler. Requests use a bounded prelude and an explicit export list. This transport offers no arbitrary remote command handler. Authorized Herdr clients still have normal terminal access to the exported core sessions.
-- Private state defaults to ~/.local/state/herdr-tailcat, with private directories and files. HERDR_TAILCAT_HOME overrides it. Do not share that directory.
+- Private state defaults to ~/.local/state/herdr-tailcat, with private directories and files. HERDR_TAILCAT_HOME overrides it. Registrations from a non-default directory bind its normalized path explicitly; default-directory targets retain the legacy format. See [target ownership and legacy registrations](docs/cli-json.md#commands) before re-registering older non-default targets. Do not share that directory.
 - A new successful stream from the same client key to the same session replaces the old stream. When max_conns is full, a client that already holds a stream may still finish that replacement: at most four such handshakes are in flight, and a handshake that does not replace an existing stream is rejected. Other clients still receive server busy. A duplicate registration can briefly displace an existing line. Client-to-server inactivity closes a stream after 90 seconds. Steady state never keeps more streams than max_conns.
 - A server crash can take about 45–70 seconds to detect and recover with core's default timing. Planned shutdown drains TCP; it does not end remote terminal programs. Restarting a core itself follows core's terminal lifecycle semantics.
 - CLI attach viewers exit when their local core connection ends; reopen them after a local core restart. The transport does not add viewer reconnection.

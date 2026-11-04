@@ -20,7 +20,6 @@ import (
 	"github.com/zhdsmy/herdr-tailcat/internal/proto"
 	"github.com/zhdsmy/herdr-tailcat/internal/store"
 	"github.com/zhdsmy/herdr-tailcat/internal/stream"
-	"golang.org/x/sys/unix"
 )
 
 func Run(id, text string) error {
@@ -144,6 +143,23 @@ func run(id, text string, connect func(context.Context, string, string) (*net.Un
 	}
 }
 func connectDaemon(ctx context.Context, dir, id string) (*net.UnixConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	// Stable startup precedes lifecycle. Never await a child while holding
+	// lifecycle: the child must acquire it before loading any identity.
+	startup, e := store.Lock(ctx, store.ProfileLockPath(dir, "startup"))
+	if e != nil {
+		return nil, errors.New("herdr-tailcat: daemon startup lock unavailable or timed out")
+	}
+	defer startup.Close()
+	lifecycle, e := store.ProfileLock(ctx, dir)
+	if e != nil {
+		return nil, errors.New("herdr-tailcat: profile lifecycle lock unavailable or timed out")
+	}
+	defer lifecycle.Close()
+	if _, e = os.Stat(filepath.Join(dir, "profile.json")); e != nil {
+		return nil, errors.New("herdr-tailcat: profile not found or inaccessible")
+	}
 	dial := func() (*net.UnixConn, error) {
 		c, err := (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, "daemon.sock"))
 		if err != nil {
@@ -151,25 +167,6 @@ func connectDaemon(ctx context.Context, dir, id string) (*net.UnixConn, error) {
 		}
 		return c.(*net.UnixConn), nil
 	}
-	if c, e := dial(); e == nil {
-		return c, nil
-	}
-	lock, e := os.OpenFile(filepath.Join(dir, "startup.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if e != nil {
-		return nil, errors.New("herdr-tailcat: profile not found or inaccessible")
-	}
-	defer lock.Close()
-	until := time.Now().Add(3 * time.Second)
-	if d, ok := ctx.Deadline(); ok && d.Before(until) {
-		until = d
-	}
-	for unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
-		if time.Now().After(until) {
-			return nil, errors.New("herdr-tailcat: daemon startup timed out")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 	if c, e := dial(); e == nil {
 		return c, nil
 	}
@@ -183,19 +180,28 @@ func connectDaemon(ctx context.Context, dir, id string) (*net.UnixConn, error) {
 	}
 	defer logfile.Close()
 	cmd := exec.Command(binary, "daemon", id)
-	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "HERDR_TAILCAT_HOME="+filepath.Dir(filepath.Dir(dir)))
 	cmd.Stdout = logfile
 	cmd.Stderr = logfile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if ctx.Err() != nil {
+		return nil, errors.New("herdr-tailcat: daemon startup timed out")
+	}
 	if e = cmd.Start(); e != nil {
 		return nil, errors.New("herdr-tailcat: cannot start profile daemon")
 	}
 	_ = cmd.Process.Release()
-	for time.Now().Before(until) {
+	lifecycle.Close()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		if c, e := dial(); e == nil {
 			return c, nil
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, errors.New("herdr-tailcat: daemon startup timed out (check profile daemon.log)")
+		case <-ticker.C:
+		}
 	}
-	return nil, errors.New("herdr-tailcat: daemon startup timed out (check profile daemon.log)")
 }

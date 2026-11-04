@@ -35,6 +35,7 @@ export default class Tailcat extends View {
     this.session = "";
     this.server = null;
     this.pending = null;
+    this.gate = null;
     this.revealOverlay = null;
     this.handle = cx.focus_handle();
     if (this.part === "bar") return;
@@ -46,7 +47,7 @@ export default class Tailcat extends View {
     this.refresh(cx);
     // This mod opens only as a dialog. Closed dialogs lose their timers; do not
     // poll when the app is in the background or while an operation is pending.
-    this.poll = cx.timer.every(5000, (cx) => { if (!this.closed && appWindow()?.active && !this.busy && !this.refreshing && !this.pending && !this.queue.length) this.refresh(cx, true); });
+    this.poll = cx.timer.every(5000, (cx) => { if (!this.closed && appWindow()?.active && !this.busy && !this.refreshing && !this.pending && (!this.profilesLoaded || !this.queue.length)) this.refresh(cx, true); });
     cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();
@@ -69,9 +70,16 @@ export default class Tailcat extends View {
   gateCommand(command) { return command === "confirm" || command === "cancel"; }
   enqueue(command, cx) {
     if (this.closed) return;
-    // Confirm and cancel are not subject to the 16-command cap. They still queue
-    // behind a refresh or busy operation; drainQueue pulls them ahead of ordinary work.
-    if (!this.gateCommand(command) && this.queue.filter((c) => !this.gateCommand(c)).length >= 16) {
+    // A response belongs only to the confirmation visible when it arrives.
+    // First response wins; duplicates cannot spill into a later deletion. The
+    // single slot remains available even when all 16 ordinary slots are full.
+    if (this.gateCommand(command)) {
+      if (!this.pending) { this.reject("There is no pending confirmation.", cx); return; }
+      if (!this.gate) this.gate = { action: this.pending, command };
+      this.drainQueue(cx); cx.notify(); return;
+    }
+    if (command === "refresh" && !this.profilesLoaded && !this.busy && !this.refreshing) { this.refresh(cx); return; }
+    if (this.queue.length >= 16) {
       this.reject("The command queue is full (16). This command was rejected.", cx);
       return;
     }
@@ -83,12 +91,17 @@ export default class Tailcat extends View {
     if (this.draining || this.closed || this.busy || this.refreshing || !this.profilesLoaded) return;
     this.draining = true;
     try {
-      while (this.queue.length && !this.closed && !this.busy && !this.refreshing) {
-        // A confirmation resolves the gate even if ordinary commands arrived
-        // ahead of it. All other commands retain their FIFO order.
-        const index = this.pending ? this.queue.findIndex((c) => this.gateCommand(c)) : 0;
-        if (index < 0) break;
-        const [command] = this.queue.splice(index, 1);
+      while (!this.closed && !this.busy && !this.refreshing) {
+        let command;
+        if (this.pending) {
+          const gate = this.gate; this.gate = null;
+          if (!gate || gate.action !== this.pending) break;
+          command = gate.command;
+        } else {
+          this.gate = null;
+          if (!this.queue.length) break;
+          command = this.queue.shift();
+        }
         if (typeof command === "function") command(cx);
         else this.command(command, cx);
       }
@@ -120,9 +133,20 @@ export default class Tailcat extends View {
   }
   async loadProfiles() {
     if (!this.localReady()) return;
-    this.profiles = (await this.client.call(["profile", "ls"])).profiles;
+    const profiles = (await this.client.call(["profile", "ls"])).profiles;
+    if (this.closed) return;
+    const previous = new Map(this.profiles.map((p) => [p.id, p]));
+    const current = new Map(profiles.map((p) => [p.id, p]));
+    const unchanged = (id) => Boolean(current.get(id)?.profile_identity && current.get(id).profile_identity === previous.get(id)?.profile_identity);
+    // Eight hex display fingerprints cannot prove identity. With an older CLI
+    // lacking the complete public identity, discard evidence on every refresh.
+    for (const id of this.keys.keys()) if (!unchanged(id)) this.keys.delete(id);
+    for (const id of this.tests.keys()) if (!unchanged(id)) this.tests.delete(id);
+    const selectedUnchanged = unchanged(this.selected);
+    this.profiles = profiles;
     this.profilesLoaded = true;
-    if (!this.profiles.some((p) => p.id === this.selected)) this.selected = this.profiles[0]?.id ?? "";
+    if (!current.has(this.selected)) this.selected = profiles[0]?.id ?? "";
+    if (!selectedUnchanged) this.session = this.tests.get(this.selected)?.server.exports[0] ?? "";
     if (this.importing && this.profiles.some((p) => p.id === this.importing)) {
       const id = this.importing;
       this.importing = "";
@@ -137,19 +161,19 @@ export default class Tailcat extends View {
   refresh(cx, quiet = false) {
     if (this.busy || this.closed) return;
     if (quiet) {
-      if (this.refreshing || this.pending || this.queue.length) return;
+      if (this.refreshing || this.pending || (this.profilesLoaded && this.queue.length)) return;
       this.refreshing = true;
-      const before = JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], this.refreshFailed]);
+      const before = JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], [...this.tests], this.selected, this.session, this.refreshFailed]);
       cx.spawn(async (cx) => {
         try {
-          if (this.page === "server") await this.loadServer();
+          if (this.page === "server" && this.profilesLoaded) await this.loadServer();
           else await this.loadProfiles();
           this.refreshFailed = false;
         } catch { this.refreshFailed = true; }
         finally {
           this.refreshing = false;
           if (!this.closed) {
-            if (before !== JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], this.refreshFailed])) cx.notify();
+            if (before !== JSON.stringify([this.profiles, this.server, this.clients, [...this.keys], [...this.tests], this.selected, this.session, this.refreshFailed])) cx.notify();
             this.drainQueue(cx);
           }
         }
@@ -157,7 +181,7 @@ export default class Tailcat extends View {
       return;
     }
     this.perform("Refreshing…", async () => {
-      if (this.page === "server") await this.loadServer();
+      if (this.page === "server" && this.profilesLoaded) await this.loadServer();
       else await this.loadProfiles();
       this.refreshFailed = false;
     }, cx, false);
@@ -229,6 +253,7 @@ export default class Tailcat extends View {
     if (this.busy || this.pending) { this.reject("Another operation or confirmation is pending.", cx); return; }
     if (!this.requireProfile(action.id, cx)) return;
     if (action.type === "unregister" && !this.machine(action.id, action.name)) { this.reject("This machine does not belong to the selected Tailcat profile.", cx); return; }
+    this.gate = null;
     this.pending = action;
     this.handle.focus();
     cx.notify();
@@ -236,7 +261,7 @@ export default class Tailcat extends View {
   confirmPending(cx) {
     const action = this.pending;
     if (!action) { this.reject("There is no pending confirmation.", cx); return; }
-    this.pending = null;
+    this.pending = null; this.gate = null;
     if (!this.requireProfile(action.id, cx)) { this.drainQueue(cx); return; }
     if (action.type === "unregister" && !this.machine(action.id, action.name)) { this.reject("This machine no longer belongs to the selected profile.", cx); this.drainQueue(cx); return; }
     this.perform("Removing…", async () => {
@@ -251,7 +276,7 @@ export default class Tailcat extends View {
   }
   cancelPending(cx) {
     if (!this.pending) { this.reject("There is no pending confirmation.", cx); return; }
-    this.pending = null;
+    this.pending = null; this.gate = null;
     this.drainQueue(cx); cx.notify();
   }
   importProfile(id, cx) {
@@ -333,7 +358,7 @@ export default class Tailcat extends View {
   close() {
     this.closed = true;
     this.poll?.cancel();
-    this.queue = [];
+    this.queue = []; this.gate = null; this.pending = null;
     for (const waiter of this.waiters) waiter.finish();
     this.clearReveal?.();
     this.keys = new Map(); this.tests = new Map();

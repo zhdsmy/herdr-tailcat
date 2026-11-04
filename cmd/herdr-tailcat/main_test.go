@@ -13,6 +13,7 @@ import (
 	"github.com/zhdsmy/herdr-tailcat/internal/daemon"
 	"github.com/zhdsmy/herdr-tailcat/internal/line"
 	"github.com/zhdsmy/herdr-tailcat/internal/proto"
+	"github.com/zhdsmy/herdr-tailcat/internal/store"
 )
 
 // The production entry point must translate a failed daemon dial into exactly
@@ -31,6 +32,9 @@ func TestViaFailureExit255(t *testing.T) {
 	defer os.RemoveAll(dir)
 	profile := filepath.Join(dir, "profiles", "p1")
 	if e = os.MkdirAll(profile, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e = store.WriteJSON(filepath.Join(profile, "profile.json"), store.Profile{}); e != nil {
 		t.Fatal(e)
 	}
 	ln, e := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(profile, "daemon.sock"), Net: "unix"})

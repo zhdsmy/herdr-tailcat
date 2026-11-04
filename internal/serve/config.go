@@ -16,7 +16,6 @@ import (
 	"github.com/zhdsmy/herdr-tailcat/internal/proto"
 	"github.com/zhdsmy/herdr-tailcat/internal/store"
 	"github.com/zhdsmy/herdr-tailcat/internal/version"
-	"golang.org/x/sys/unix"
 	"tailscale.com/types/key"
 )
 
@@ -68,31 +67,23 @@ func Address(home string, full bool) (string, error) {
 
 // withConfigLock serializes allow and export edits across processes.
 // The same exclusive lock covers the read, the check, and the rewrite.
-func withConfigLock(home string, fn func() error) error {
-	dir := filepath.Join(home, "server")
-	if e := os.MkdirAll(dir, 0700); e != nil {
-		return e
-	}
-	f, e := os.OpenFile(filepath.Join(dir, "config.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if e != nil {
-		return e
+func withConfigLock(ctx context.Context, home string, fn func() error) error {
+	f, err := store.Lock(ctx, filepath.Join(home, "server", "config.lock"))
+	if err != nil {
+		return err
 	}
 	defer f.Close()
-	if e = f.Chmod(0600); e != nil {
-		return e
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if e = unix.Flock(int(f.Fd()), unix.LOCK_EX); e != nil {
-		return e
-	}
-	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
 	return fn()
 }
-func AllowAdd(home, text string) error {
+func AllowAdd(ctx context.Context, home, text string) error {
 	var k key.NodePublic
 	if k.UnmarshalText([]byte(text)) != nil || k.IsZero() {
 		return errors.New("invalid client public key")
 	}
-	return withConfigLock(home, func() error {
+	return withConfigLock(ctx, home, func() error {
 		keys, found, e := editAllow(home, k, true)
 		if e != nil {
 			return e
@@ -103,12 +94,12 @@ func AllowAdd(home, text string) error {
 		return writeAllow(home, append(keys, k))
 	})
 }
-func AllowRemove(home, text string) (emptied bool, err error) {
+func AllowRemove(ctx context.Context, home, text string) (emptied bool, err error) {
 	var k key.NodePublic
 	if k.UnmarshalText([]byte(text)) != nil || k.IsZero() {
 		return false, errors.New("invalid client public key")
 	}
-	err = withConfigLock(home, func() error {
+	err = withConfigLock(ctx, home, func() error {
 		keys, found, e := editAllow(home, k, true)
 		if e != nil {
 			return e
@@ -150,11 +141,11 @@ func writeAllow(home string, keys []key.NodePublic) error {
 	}
 	return store.WriteFile(filepath.Join(home, "server", "allowed_clients"), []byte(b.String()))
 }
-func ExportAdd(home, s string) error {
+func ExportAdd(ctx context.Context, home, s string) error {
 	if !line.ValidName(s) {
 		return errors.New("invalid export session")
 	}
-	return withConfigLock(home, func() error {
+	return withConfigLock(ctx, home, func() error {
 		cfg, e := readExports(home)
 		if e != nil {
 			return e
@@ -171,11 +162,11 @@ func ExportAdd(home, s string) error {
 		return store.WriteJSON(filepath.Join(home, "server", "config.json"), cfg)
 	})
 }
-func ExportRemove(home, s string) error {
+func ExportRemove(ctx context.Context, home, s string) error {
 	if !line.ValidName(s) {
 		return errors.New("invalid export session")
 	}
-	return withConfigLock(home, func() error {
+	return withConfigLock(ctx, home, func() error {
 		cfg, e := readExports(home)
 		if e != nil {
 			return e

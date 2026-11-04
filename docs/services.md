@@ -3,7 +3,7 @@
 install-service generates service files. server service start/stop/status controls launchd on macOS; Linux operations never run systemctl.
 Use an absolute installed binary path; rebuilding or moving that binary changes what the service executes.
 
-On macOS, install the binary outside ~/Documents, ~/Desktop and ~/Downloads, for example at ~/.local/bin/herdr-tailcat. Tailscale reads its own executable during startup; running a new build from these privacy-protected folders can trigger a permission prompt and stall a launchd service. install-service rejects resolved executable paths in these folders with invalid_arguments, including symlinks into them. Use a binary outside the folders; signing changes or privacy permission grants are not required.
+On macOS, install both herdr-tailcat and the configured herdr-core outside ~/Documents, ~/Desktop and ~/Downloads, for example at ~/.local/bin/herdr-tailcat. Tailscale reads its own executable during startup; running a new build from these privacy-protected folders can trigger a permission prompt and stall a launchd service. install-service checks original and resolved paths for both executables, including dry-run, and rejects paths in these folders with invalid_arguments, including symlinks into them. Use a binary outside the folders; signing changes or privacy permission grants are not required.
 
 Runtime tests copy the built binary and core into a private scratch bin directory. Direct calls, via targets and launchd ProgramArguments all use those copies, with path assertions; child working directories also point to scratch. A repository build under Documents is only a copy source and must not be executed there. The recipe's Watch out section must preserve this installation requirement.
 

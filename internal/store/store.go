@@ -18,17 +18,53 @@ type Profile struct {
 	Address string `json:"address"`
 }
 
+func DefaultHome() (string, error) {
+	d, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, ".local", "state", "herdr-tailcat"), nil
+}
+
+// CanonicalPath resolves existing ancestors too, so an absent default directory
+// can be compared without creating it. Relative overrides bind to this cwd.
+func CanonicalPath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", err
+	}
+	parent, err = CanonicalPath(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
 func Home() (string, error) {
 	h := os.Getenv("HERDR_TAILCAT_HOME")
 	if h == "" {
-		d, e := os.UserHomeDir()
-		if e != nil {
-			return "", e
+		var err error
+		h, err = DefaultHome()
+		if err != nil {
+			return "", err
 		}
-		h = filepath.Join(d, ".local", "state", "herdr-tailcat")
 	}
-	if e := os.MkdirAll(h, 0700); e != nil {
-		return "", e
+	h, err := CanonicalPath(h)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(h, 0700); err != nil {
+		return "", err
 	}
 	return h, os.Chmod(h, 0700)
 }

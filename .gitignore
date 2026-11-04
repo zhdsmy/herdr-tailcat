@@ -6,3 +6,8 @@
 /mods/tailcat/*.d.ts
 /mods/tailcat/jsconfig.json
 __pycache__/
+
+# Local working notes and evidence; never published.
+/PLAN.md
+/EVIDENCE/
+*.local.md

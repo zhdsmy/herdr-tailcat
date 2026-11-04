@@ -1,6 +1,6 @@
 # Third-party notices
 
-The following modules are linked into the v0.0.3 builds, as reported by go version -m: 37 for darwin/arm64 and 41 for linux/amd64, or 42 distinct modules. The target column distinguishes platform-specific dependencies. This is a subset of go list -m all; unused graph modules are excluded. License identifiers and filenames were verified against the pinned modules in the Go module cache. Each link opens the license texts for that module version. No dependency source is vendored in this repository.
+The following modules are linked into the v0.0.4 builds, as reported by go version -m: 37 for darwin/arm64 and 41 for linux/amd64, or 42 distinct modules. The target column distinguishes platform-specific dependencies. This is a subset of go list -m all; unused graph modules are excluded. License identifiers and filenames were verified against the pinned modules in the Go module cache. Each link opens the license texts for that module version. No dependency source is vendored in this repository.
 
 The Go runtime and standard library are covered by the [Go BSD license](https://go.dev/LICENSE). Distributors of built binaries should carry the applicable full license and copyright notices from these pinned dependencies, including any relevant subpackage notices. The root license file for compress includes additional Apache-2.0 and MIT sections; those sections identify their scope. The module's main code uses BSD-3-Clause.
 

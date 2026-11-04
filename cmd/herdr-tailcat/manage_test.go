@@ -40,12 +40,19 @@ func setupCLI(t *testing.T) string {
 	home := os.Getenv("HERDR_TAILCAT_HOME")
 	os.MkdirAll(home, 0700)
 	fake := filepath.Join(dir, "hc")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HC_FAKE_CALLS\"\nif [ \"$3\" = ls ]; then cat \"$HC_FAKE_LS\"; exit 0; fi\nif [ -n \"$HC_FAKE_ERR\" ]; then printf '%s\\n' \"$HC_FAKE_ERR\" >&2; exit 6; fi\nif [ \"$3\" = add ]; then printf '%s\\n' '{\"name\":\"box\",\"id\":\"core-id\",\"host\":\"host\",\"version\":\"0.1.16\",\"session\":\"tc-work\",\"target\":\"omit-me\"}'; else printf '{}\\n'; fi\n"
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$HC_FAKE_CALLS"
+if [ "$3" = ls ]; then cat "$HC_FAKE_LS"; exit 0; fi
+if [ -s "$HC_FAKE_ERR_FILE" ]; then cat "$HC_FAKE_ERR_FILE" >&2; exit 6; fi
+if [ "$3" = add ]; then printf '%s\n' '{"name":"box","id":"core-id","host":"host","version":"0.1.16","session":"tc-work","target":"omit-me"}'; else printf '{}\n'; fi
+`
 	os.WriteFile(fake, []byte(script), 0700)
 	t.Setenv("PATH", dir+":/usr/bin:/bin")
 	t.Setenv("HC_FAKE_CALLS", filepath.Join(dir, "calls"))
 	t.Setenv("HC_FAKE_LS", filepath.Join(dir, "machines"))
+	t.Setenv("HC_FAKE_ERR_FILE", filepath.Join(dir, "core-error"))
 	t.Setenv("HC_FAKE_ERR", "")
+	setCoreError(t, "")
 	os.WriteFile(os.Getenv("HC_FAKE_LS"), []byte("{\"machines\":[]}"), 0600)
 	k := tailcat.NewPrivateKey()
 	k.Public.RegionID = -1
@@ -53,6 +60,12 @@ func setupCLI(t *testing.T) string {
 	// A minimal fixed DERP node is supplied by the same helper used in serve tests.
 	writeIdentity(t, home, *k)
 	return home
+}
+func setCoreError(t *testing.T, diagnostic string) {
+	t.Helper()
+	if err := store.WriteFile(os.Getenv("HC_FAKE_ERR_FILE"), []byte(diagnostic)); err != nil {
+		t.Fatal(err)
+	}
 }
 func writeIdentity(t *testing.T, home string, k tailcat.PrivateKey) {
 	t.Helper()
@@ -134,7 +147,7 @@ func TestCoreErrorsAndLocalPreflight(t *testing.T) {
 	home := setupCLI(t)
 	pingFixture(t, home)
 	for _, kind := range []string{"name_taken", "already_added", "usage", "unreachable"} {
-		t.Setenv("HC_FAKE_ERR", asString(map[string]any{"error": map[string]string{"kind": kind, "message": "original message", "hint": "original hint"}}))
+		setCoreError(t, asString(map[string]any{"error": map[string]string{"kind": kind, "message": "original message", "hint": "original hint"}}))
 		r, e, _ := invoke(t, "profile", "register", "p1", "--name", "box", "--session", "tc-work")
 		if e == nil {
 			t.Fatal("expected core failure")
@@ -153,7 +166,7 @@ func TestCoreErrorsAndLocalPreflight(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("unexported session reached core")
 	}
-	t.Setenv("HC_FAKE_ERR", "")
+	setCoreError(t, "")
 	r, e, _ = invoke(t, "profile", "register", "p1", "--name", "box", "--session", "tc-work", "--temp")
 	if e != nil || r["machine"].(map[string]any)["target"] != nil {
 		t.Fatal(r, e)
@@ -343,7 +356,7 @@ func TestJSONContractAndSecrets(t *testing.T) {
 		}
 	}
 	for _, secret := range secrets {
-		t.Setenv("HC_FAKE_ERR", asString(map[string]any{"error": map[string]string{"kind": "unreachable", "message": secret, "hint": secret}}))
+		setCoreError(t, asString(map[string]any{"error": map[string]string{"kind": "unreachable", "message": secret, "hint": secret}}))
 		r, e, out := invoke(t, "profile", "register", "p1", "--name", "box", "--session", "tc-work")
 		if e == nil || r["error"].(map[string]any)["kind"] != "core:unreachable" {
 			t.Fatal(r, e)

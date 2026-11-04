@@ -304,7 +304,7 @@ func (m *manager) handleAdmitted(parent context.Context, c net.Conn, cfg store.S
 	m.active.Add(1)
 	defer m.active.Add(-1)
 	_ = c.SetWriteDeadline(time.Time{})
-	m.commit(own)
+	m.commit(peerKey, session, own)
 	activity := &activity{last: time.Now()}
 	go m.watch(ctx, cancel, activity, m.sequence.Add(1))
 	done := make(chan int, 2)

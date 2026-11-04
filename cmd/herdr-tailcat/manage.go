@@ -26,6 +26,9 @@ func fail(kind, message, hint string) error {
 	return &cliError{kind, redact.Clean(message), redact.Clean(hint)}
 }
 func asCLIError(err error) *cliError {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &cliError{"timeout", "command exceeded its time budget", ""}
+	}
 	var e *cliError
 	if errors.As(err, &e) {
 		return &cliError{e.Kind, redact.Clean(e.Message), redact.Clean(e.Hint)}

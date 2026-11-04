@@ -50,6 +50,12 @@ func serviceInstall(args []string) (map[string]any, *string, error) {
 	if err = store.ReadJSON(filepath.Join(home, "server", "config.json"), &cfg); err != nil {
 		return nil, nil, usage("initialize server before generating service files")
 	}
+	if *target == "darwin" {
+		cfg.HerdrCore, err = serviceBinary(*target, cfg.HerdrCore, userHome)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	env := map[string]string{"HOME": userHome,
 		"XDG_STATE_HOME":  filepath.Join(userHome, ".local", "state"),
 		"XDG_CONFIG_HOME": filepath.Join(userHome, ".config"), "XDG_RUNTIME_DIR": ""}
@@ -100,7 +106,7 @@ func serviceBinary(target, binary, userHome string) (string, error) {
 				for _, candidate := range []string{binary, resolved} {
 					rel, err := filepath.Rel(location, candidate)
 					if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-						return "", usage("macOS services cannot execute binaries in ~/Documents, ~/Desktop or ~/Downloads; install herdr-tailcat outside these folders (for example ~/.local/bin), then generate the service again")
+						return "", usage("macOS services cannot execute binaries in ~/Documents, ~/Desktop or ~/Downloads; install herdr-tailcat and herdr-core outside these folders (for example ~/.local/bin), then generate the service again")
 					}
 				}
 			}

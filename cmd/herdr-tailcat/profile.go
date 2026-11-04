@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -59,28 +61,39 @@ func profileManage(ctx context.Context, home string, args []string, in io.Reader
 			if e != nil {
 				return nil, nil, e
 			}
-			var p store.Profile
-			if e = store.ReadJSON(filepath.Join(dir, "profile.json"), &p); e != nil {
+			view, e := func() (map[string]any, error) {
+				lock, e := store.ProfileLock(ctx, dir)
+				if e != nil {
+					return nil, e
+				}
+				defer lock.Close()
+				var p store.Profile
+				if e = store.ReadJSON(filepath.Join(dir, "profile.json"), &p); e != nil {
+					return nil, e
+				}
+				ci, e := tailcat.ParseAddr(tailcat.Addr(p.Address))
+				if e != nil {
+					return nil, fail("invalid_config", "invalid profile address", "")
+				}
+				pk, e := daemon.PublicKey(dir)
+				if e != nil {
+					return nil, e
+				}
+				target, e := profileTarget(id)
+				if e != nil {
+					return nil, e
+				}
+				views := []map[string]any{}
+				for _, m := range matching(ms, target) {
+					views = append(views, m.view())
+				}
+				_, running := runstate.Read(dir, "daemon")
+				return map[string]any{"id": id, "profile_identity": fmt.Sprintf("%x", sha256.Sum256([]byte(pk+"\x00"+ci.ServerPublic.NodePublic.String()+"\x00"+ci.ServerDiscoPublic.String()))), "client_fingerprint": fingerprint(pk), "server_fingerprint": fingerprint(ci.ServerPublic.NodePublic.String()), "daemon_running": running, "machines": views}, nil
+			}()
+			if e != nil {
 				return nil, nil, e
 			}
-			ci, e := tailcat.ParseAddr(tailcat.Addr(p.Address))
-			if e != nil {
-				return nil, nil, fail("invalid_config", "invalid profile address", "")
-			}
-			pk, e := daemon.PublicKey(dir)
-			if e != nil {
-				return nil, nil, e
-			}
-			target, e := profileTarget(id)
-			if e != nil {
-				return nil, nil, e
-			}
-			views := []map[string]any{}
-			for _, m := range matching(ms, target) {
-				views = append(views, m.view())
-			}
-			_, running := runstate.Read(dir, "daemon")
-			profiles = append(profiles, map[string]any{"id": id, "client_fingerprint": fingerprint(pk), "server_fingerprint": fingerprint(ci.ServerPublic.NodePublic.String()), "daemon_running": running, "machines": views})
+			profiles = append(profiles, view)
 		}
 		return map[string]any{"profiles": profiles}, nil, nil
 	}
@@ -106,7 +119,13 @@ func profileManage(ctx context.Context, home string, args []string, in io.Reader
 		if len(b) > 16384 {
 			return nil, nil, usage("address input exceeds 16 KiB")
 		}
-		if e = daemon.AddProfile(dir, string(b)); e != nil {
+		if e = daemon.AddProfileContext(ctx, dir, string(b)); e != nil {
+			if errors.Is(e, context.Canceled) || errors.Is(e, context.DeadlineExceeded) {
+				return nil, nil, e
+			}
+			if errors.Is(e, daemon.ErrProfileExists) {
+				return nil, nil, fail("already_exists", "profile already exists", "")
+			}
 			return nil, nil, fail("invalid_address", e.Error(), "")
 		}
 		return result, nil, nil
@@ -212,31 +231,34 @@ func profileManage(ctx context.Context, home string, args []string, in io.Reader
 		if e = parse(f, args[2:]); e != nil {
 			return nil, nil, e
 		}
-		target, e := profileTarget(id)
-		if e != nil {
-			return nil, nil, e
-		}
-		ms, e := machines(ctx)
-		if e != nil {
-			return nil, nil, e
-		}
-		owned := matching(ms, target)
-		if len(owned) > 0 && !*force {
-			names := []string{}
+		e = store.RemoveProfile(ctx, dir, func() error {
+			target, e := profileTarget(id)
+			if e != nil {
+				return e
+			}
+			ms, e := machines(ctx)
+			if e != nil {
+				return e
+			}
+			owned := matching(ms, target)
+			if len(owned) > 0 && !*force {
+				names := []string{}
+				for _, m := range owned {
+					names = append(names, redact.Clean(m.Name))
+				}
+				return fail("profile_in_use", "profile has registered machines", strings.Join(names, ", ")+"; unregister them or use --force")
+			}
 			for _, m := range owned {
-				names = append(names, redact.Clean(m.Name))
+				if _, e = callCore(ctx, "machine", "rm", m.Name); e != nil {
+					return e
+				}
 			}
-			return nil, nil, fail("profile_in_use", "profile has registered machines", strings.Join(names, ", ")+"; unregister them or use --force")
-		}
-		for _, m := range owned {
-			if _, e = callCore(ctx, "machine", "rm", m.Name); e != nil {
-				return nil, nil, e
+			if e = stopDaemon(ctx, dir); e != nil {
+				return e
 			}
-		}
-		if e = stopDaemon(ctx, dir); e != nil {
-			return nil, nil, e
-		}
-		return result, nil, os.RemoveAll(dir)
+			return nil
+		})
+		return result, nil, e
 	default:
 		return nil, nil, usage("unknown profile command")
 	}

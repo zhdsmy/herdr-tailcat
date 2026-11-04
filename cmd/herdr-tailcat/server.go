@@ -111,12 +111,12 @@ func serverManage(ctx context.Context, home string, args []string) (map[string]a
 			return nil, nil, usage("invalid client public key")
 		}
 		if args[1] == "add" {
-			return result, nil, serve.AllowAdd(home, args[2])
+			return result, nil, serve.AllowAdd(ctx, home, args[2])
 		}
 		if args[1] != "rm" {
 			return nil, nil, usage("unknown allow command")
 		}
-		emptied, e := serve.AllowRemove(home, args[2])
+		emptied, e := serve.AllowRemove(ctx, home, args[2])
 		if e != nil {
 			if errors.Is(e, serve.ErrNotAllowed) {
 				return nil, nil, fail("not_found", "client key is not allowed", "")
@@ -144,12 +144,12 @@ func serverManage(ctx context.Context, home string, args []string) (map[string]a
 			return nil, nil, usage("usage: server export add|rm <session>")
 		}
 		if args[1] == "add" {
-			return result, nil, serve.ExportAdd(home, args[2])
+			return result, nil, serve.ExportAdd(ctx, home, args[2])
 		}
 		if args[1] != "rm" {
 			return nil, nil, usage("unknown export command")
 		}
-		if e := serve.ExportRemove(home, args[2]); e != nil {
+		if e := serve.ExportRemove(ctx, home, args[2]); e != nil {
 			if errors.Is(e, serve.ErrNotExported) {
 				return nil, nil, fail("not_found", "session is not exported", "")
 			}

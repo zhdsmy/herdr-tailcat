@@ -105,7 +105,7 @@ func TestExportAddRejectsOversizedList(t *testing.T) {
 	var added []string
 	for i := 0; i < 200; i++ {
 		name := fmt.Sprintf("n%03d", i) + strings.Repeat("c", 28)
-		err := ExportAdd(home, name)
+		err := ExportAdd(context.Background(), home, name)
 		if err != nil {
 			if !strings.Contains(err.Error(), "handshake reply would exceed 4 KiB") {
 				t.Fatal(err)
@@ -130,7 +130,7 @@ func TestConcurrentExportAddKeepsEveryName(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- ExportAdd(home, fmt.Sprintf("x%02d", i)+strings.Repeat("e", 29))
+			errs <- ExportAdd(context.Background(), home, fmt.Sprintf("x%02d", i)+strings.Repeat("e", 29))
 		}()
 	}
 	wg.Wait()
@@ -173,7 +173,7 @@ func TestConcurrentAllowAddOneSuccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- AllowAdd(home, pub)
+			errs <- AllowAdd(context.Background(), home, pub)
 		}()
 	}
 	wg.Wait()
@@ -213,9 +213,9 @@ func TestConcurrentAddRemoveMatchesSerialOrder(t *testing.T) {
 			defer wg.Done()
 			<-start
 			if item.add {
-				got[i] = ExportAdd(home, item.name)
+				got[i] = ExportAdd(context.Background(), home, item.name)
 			} else {
-				got[i] = ExportRemove(home, item.name)
+				got[i] = ExportRemove(context.Background(), home, item.name)
 			}
 		}()
 	}
@@ -279,7 +279,7 @@ func TestConcurrentAddRemoveMatchesSerialOrder(t *testing.T) {
 func TestConfigLockAcrossProcesses(t *testing.T) {
 	if os.Getenv("HERDR_TAILCAT_LOCK_CHILD") == "1" {
 		home := os.Getenv("HERDR_TAILCAT_LOCK_HOME")
-		err := ExportAdd(home, os.Getenv("HERDR_TAILCAT_LOCK_NAME"))
+		err := ExportAdd(context.Background(), home, os.Getenv("HERDR_TAILCAT_LOCK_NAME"))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err.Error())
 			os.Exit(1)
@@ -291,7 +291,7 @@ func TestConfigLockAcrossProcesses(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	go func() {
-		_ = withConfigLock(home, func() error {
+		_ = withConfigLock(context.Background(), home, func() error {
 			close(entered)
 			<-release
 			return nil
@@ -347,15 +347,15 @@ func TestAllowAddRemoveSerialOutcomes(t *testing.T) {
 	for range 20 {
 		// Start absent. Add then remove leaves absent; remove then add returns
 		// not-found from remove and leaves exactly one key. No other outcome is valid.
-		_, err := AllowRemove(home, pub)
+		_, err := AllowRemove(context.Background(), home, pub)
 		if err != nil && !errors.Is(err, ErrNotAllowed) {
 			t.Fatal(err)
 		}
 		gate := make(chan struct{})
 		added := make(chan error, 1)
 		removed := make(chan error, 1)
-		go func() { <-gate; added <- AllowAdd(home, pub) }()
-		go func() { <-gate; _, err := AllowRemove(home, pub); removed <- err }()
+		go func() { <-gate; added <- AllowAdd(context.Background(), home, pub) }()
+		go func() { <-gate; _, err := AllowRemove(context.Background(), home, pub); removed <- err }()
 		close(gate)
 		if err := <-added; err != nil {
 			t.Fatal(err)
@@ -377,5 +377,16 @@ func TestAllowAddRemoveSerialOutcomes(t *testing.T) {
 		if rmErr != nil && !errors.Is(rmErr, ErrNotAllowed) {
 			t.Fatal(rmErr)
 		}
+	}
+}
+
+func TestCanceledConfigMutationDoesNotStart(t *testing.T) {
+	home := t.TempDir()
+	writeServer(t, home, []string{"tc-work"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	if err := withConfigLock(ctx, home, func() error { called = true; return nil }); !errors.Is(err, context.Canceled) || called {
+		t.Fatal("canceled mutation started", err)
 	}
 }

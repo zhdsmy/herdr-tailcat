@@ -13,6 +13,7 @@ import (
 
 	"github.com/zhdsmy/herdr-tailcat/internal/line"
 	"github.com/zhdsmy/herdr-tailcat/internal/redact"
+	"github.com/zhdsmy/herdr-tailcat/internal/store"
 )
 
 func validName(s string) bool    { return line.ValidName(s) }
@@ -30,7 +31,25 @@ func profileTarget(id string) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	return shellQuote(b) + " via " + shellQuote(id), nil
+	target := shellQuote(b) + " via " + shellQuote(id)
+	home, err := store.Home()
+	if err != nil {
+		return "", err
+	}
+	defaultHome, err := store.DefaultHome()
+	if err != nil {
+		return "", err
+	}
+	defaultHome, err = store.CanonicalPath(defaultHome)
+	if err != nil {
+		return "", err
+	}
+	// Default-home targets retain the exact legacy bytes. Unbound legacy targets
+	// are owned only in that default namespace; other homes match explicit targets.
+	if home != defaultHome {
+		target = "HERDR_TAILCAT_HOME=" + shellQuote(home) + " " + target
+	}
+	return target, nil
 }
 
 // Never copy core target strings into result objects or errors.

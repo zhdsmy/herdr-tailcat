@@ -25,15 +25,18 @@ type Engine struct {
 	rebuildErr  error
 	closed      bool
 	DialTimeout time.Duration
+	lifetime    context.Context
+	stop        context.CancelFunc
 }
 
 func NewEngine(factory func() Dialer) *Engine {
-	return &Engine{factory: factory, client: factory(), DialTimeout: 8 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Engine{factory: factory, client: factory(), DialTimeout: 8 * time.Second, lifetime: ctx, stop: cancel}
 }
 func (e *Engine) snapshot(ctx context.Context) (Dialer, uint64, error) {
 	for {
 		e.mu.Lock()
-		if e.closed {
+		if e.closed || ctx.Err() != nil {
 			e.mu.Unlock()
 			return nil, 0, ErrNoAnswer
 		}
@@ -65,6 +68,12 @@ func (e *Engine) Dial(ctx context.Context) (net.Conn, error) {
 	if err == nil {
 		return conn, nil
 	}
+	// A request deadline says nothing about the health of the shared client.
+	// Only an Engine dial timeout (with caller budget remaining) or a transport
+	// failure may start recovery. Keep dependency diagnostics private.
+	if ctx.Err() != nil {
+		return nil, ErrNoAnswer
+	}
 	if err = e.rebuild(ctx, g); err != nil {
 		return nil, ErrNoAnswer
 	}
@@ -78,41 +87,47 @@ func (e *Engine) Dial(ctx context.Context) (net.Conn, error) {
 	}
 	return conn, nil
 }
+
+// Recovery belongs to the Engine, not its first waiter. A canceled caller stops
+// waiting without canceling the bounded Ping shared by the remaining callers.
 func (e *Engine) rebuild(ctx context.Context, expected uint64) error {
 	e.mu.Lock()
-	if e.closed {
+	if e.closed || ctx.Err() != nil {
 		e.mu.Unlock()
 		return ErrNoAnswer
 	}
-	if ch := e.rebuilding; ch != nil {
-		e.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return ErrNoAnswer
+	ch := e.rebuilding
+	if ch == nil {
+		if e.generation != expected {
+			err := e.rebuildErr
+			e.mu.Unlock()
+			return err
 		}
-		e.mu.Lock()
-		err := e.rebuildErr
-		e.mu.Unlock()
-		return err
+		ch = make(chan struct{})
+		e.rebuilding = ch
+		old := e.client
+		go e.recover(old, ch)
 	}
-	if e.generation != expected {
-		err := e.rebuildErr
-		e.mu.Unlock()
-		return err
-	}
-	ch := make(chan struct{})
-	e.rebuilding = ch
-	old := e.client
 	e.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ErrNoAnswer
+	case <-ch:
+	}
+	e.mu.Lock()
+	err := e.rebuildErr
+	e.mu.Unlock()
+	return err
+}
+func (e *Engine) recover(old Dialer, ch chan struct{}) {
 	_ = old.Close()
 	fresh := e.factory()
-	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	pingCtx, cancel := context.WithTimeout(e.lifetime, 10*time.Second)
 	err := fresh.Ping(pingCtx)
 	cancel()
 	e.mu.Lock()
-	if e.closed {
-		_ = fresh.Close()
+	closed := e.closed
+	if closed {
 		err = ErrNoAnswer
 	} else {
 		e.client = fresh
@@ -122,6 +137,19 @@ func (e *Engine) rebuild(ctx context.Context, expected uint64) error {
 	e.rebuilding = nil
 	close(ch)
 	e.mu.Unlock()
-	return err
+	if closed {
+		_ = fresh.Close()
+	}
 }
-func (e *Engine) Close() { e.mu.Lock(); e.closed = true; c := e.client; e.mu.Unlock(); _ = c.Close() }
+func (e *Engine) Close() {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return
+	}
+	e.closed = true
+	e.stop()
+	c := e.client
+	e.mu.Unlock()
+	_ = c.Close()
+}
